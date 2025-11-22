@@ -7,7 +7,7 @@ defmodule P do
   """
   use Rustler, otp_app: :p, crate: "p"
 
-  defstruct [:cmd, :args, :pid, :status]
+  defstruct [:cmd, :args, :pid, :status, :resource]
 
   @doc """
   Spawn an OS process running `cmd` with `args`.
@@ -28,11 +28,12 @@ defmodule P do
   def spawn(cmd, args) when is_binary(cmd) and is_list(args) do
     ensure_sigchild()
 
-    with pid when is_integer(pid) <- spawn_nif(cmd, args) do
+    with {resource, pid} <- spawn_nif(cmd, args) do
       struct(__MODULE__,
         cmd: cmd,
         args: args,
         pid: pid,
+        resource: resource,
         status: :running
       )
     end
@@ -77,7 +78,7 @@ defmodule P do
       iex> process.status
       {:exited, 0}
   """
-  def wait(%__MODULE__{pid: pid, status: status} = process) do
+  def wait(%__MODULE__{resource: resource, status: status} = process) do
     ensure_sigchild()
 
     case status do
@@ -85,11 +86,77 @@ defmodule P do
         process
 
       :running ->
-        code = wait_nif(pid)
+        code = wait_nif(resource)
         %{process | status: {:exited, code}}
 
       nil ->
         raise "Invalid process state"
+    end
+  end
+
+  @doc """
+  Check if the process is still alive.
+
+  ## Examples
+
+      iex> process = P.spawn("sleep", ["10"])
+      iex> P.alive?(process)
+      true
+      iex> P.signal(process, :sigterm)
+      iex> P.wait(process)
+      iex> P.alive?(process)
+      false
+  """
+  def alive?(%__MODULE__{resource: resource, status: :running}) do
+    alive_nif(resource)
+  end
+
+  def alive?(%__MODULE__{status: {:exited, _}}), do: false
+
+  @doc """
+  Read from the process stdout.
+
+  ## Examples
+
+      iex> process = P.spawn("echo", ["hello"])
+      iex> Process.sleep(100) # Wait for output
+      iex> P.read_stdout(process)
+      "hello\\n"
+  """
+  def read_stdout(%__MODULE__{resource: resource}) do
+    read_stdout_nif(resource)
+  end
+
+  @doc """
+  Read from the process stderr.
+
+  ## Examples
+
+      iex> process = P.spawn("sh", ["-c", "echo error >&2"])
+      iex> Process.sleep(100) # Wait for output
+      iex> P.read_stderr(process)
+      "error\\n"
+  """
+  def read_stderr(%__MODULE__{resource: resource}) do
+    read_stderr_nif(resource)
+  end
+
+  @doc """
+  Write to the process stdin.
+
+  ## Examples
+
+      iex> process = P.spawn("cat", [])
+      iex> P.write_stdin(process, "hello")
+      :ok
+      iex> Process.sleep(100) # Wait for echo
+      iex> P.read_stdout(process)
+      "hello"
+  """
+  def write_stdin(%__MODULE__{resource: resource}, data) do
+    case write_stdin_nif(resource, data) do
+      {} -> :ok
+      error -> error
     end
   end
 
@@ -100,7 +167,19 @@ defmodule P do
   def signal_nif(_pid, _signal), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
-  def wait_nif(_pid), do: :erlang.nif_error(:nif_not_loaded)
+  def wait_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def alive_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def read_stdout_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def read_stderr_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def write_stdin_nif(_resource, _data), do: :erlang.nif_error(:nif_not_loaded)
 
   defp ensure_sigchild() do
     # waitpid running in the context of the beam is kind of weird
