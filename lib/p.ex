@@ -1,84 +1,349 @@
 defmodule P do
   @moduledoc """
-  A simple module for managing OS processes in Elixir.
+  Low-level OS process management for Elixir. Linux only.
 
-  For when you just want to spawn a process, send a signal,
-  and wait for it to finish.
+  ## Basic Usage
+
+      # Spawn, signal, wait
+      p = P.spawn!("sleep", ["10"])
+      p = P.signal!(p, :sigterm)
+      p = P.wait(p)
+      p.status  #=> {:exited, 143}
+
+      # With error handling
+      {:ok, p} = P.spawn("sleep", ["10"])
+      {:ok, p} = P.signal(p, :sigterm)
+      p = P.wait(p)
+
+  ## Stdio Configuration
+
+  By default, stdin/stdout/stderr go to `/dev/null`. Configure per-stream:
+
+  - `nil` - /dev/null (default)
+  - `:pipe` - pipe for reading/writing from Elixir
+  - `:inherit` - share BEAM's stdio (for interactive programs)
+  - `{:file, path}` - redirect to/from file
+
+  ### Fire and Forget
+
+  Default config discards all output. Useful for daemons or when you
+  only care about exit status:
+
+      p = P.spawn!("some-daemon", ["--detach"])
+      p = P.wait(p)
+
+  ### File Redirection
+
+  Let the OS handle buffering. Good for logging:
+
+      p = P.spawn!("my-server", [],
+        stdout: {:file, "/var/log/out.log"},
+        stderr: {:file, "/var/log/err.log"})
+
+  ### Pipes
+
+  For reading output or writing input. Non-blocking by default.
+
+      # Capture output
+      p = P.spawn!("echo", ["hello"], stdout: :pipe)
+      Process.sleep(50)  # let it run
+      {:ok, "hello\\n"} = P.read(p, :stdout)
+
+      # Feed input
+      p = P.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
+      P.write(p, "hello")
+      P.close!(p, :stdin)  # signals EOF
+      Process.sleep(50)
+      {:ok, "hello"} = P.read(p, :stdout)
+
+  **Warning:** Pipes have limited buffer (~64KB). If the child writes more
+  than the buffer can hold and you don't read, the child blocks forever.
+  Drain pipes continuously for long-running processes.
+
+  ### Inherit
+
+  Child uses BEAM's terminal directly. For interactive programs:
+
+      p = P.spawn!("vim", ["file.txt"],
+        stdin: :inherit,
+        stdout: :inherit,
+        stderr: :inherit)
+      P.wait(p)
+
+  ## Timeouts
+
+  `wait/2` accepts a timeout in milliseconds:
+
+      case P.wait(p, 5_000) do
+        :timeout ->
+          P.signal!(p, :sigkill)
+          P.wait(p)
+        p ->
+          p
+      end
+
+  ## Environment and Working Directory
+
+      P.spawn!("make", ["build"],
+        cd: "/path/to/project",
+        env: %{"CC" => "clang", "CFLAGS" => "-O2"})
+
+  Environment variables are merged with the inherited environment.
+
+  ## Signals
+
+  Signals are sent by name (atom) or number:
+
+      P.signal!(p, :sigterm)   # graceful shutdown
+      P.signal!(p, :sigkill)   # force kill
+      P.signal!(p, :sigusr1)   # user-defined
+      P.signal!(p, 15)         # by number
+
+  Signal safety: once a process has been reaped (via `alive?/1` or `wait/1`),
+  `signal/2` returns `{:error, :already_exited}` to prevent signaling a
+  recycled PID.
+
+  ## Non-blocking Reads/Writes
+
+  Pipe operations are non-blocking:
+
+      P.read(p, :stdout)
+      #=> {:ok, binary}    - data available
+      #=> :would_block     - no data yet
+      #=> :eof             - stream closed
+
+      P.write(p, data)
+      #=> :ok              - all written
+      #=> {:partial, n}    - buffer full, n bytes written
+      #=> :would_block     - buffer completely full
+      #=> {:error, :broken_pipe}  - child closed stdin
+
+  ## Process Lifecycle
+
+  1. `spawn/3` - creates process, returns `{:ok, %P{status: :running}}`
+  2. `alive?/1` - checks if still running (non-blocking)
+  3. `signal/2` - sends signal
+  4. `wait/1,2` - blocks until exit, updates `status` to `{:exited, code}`
+
+  Exit codes: normal exit returns the code (0-255). Signal termination
+  returns 128 + signal number (e.g., SIGKILL=9 → 137).
   """
+  import Kernel, except: [spawn: 1, spawn: 3]
+
   use Rustler, otp_app: :p, crate: "p"
 
-  defstruct [:cmd, :args, :pid, :status, :resource]
+  defstruct [:cmd, :args, :pid, :status, :resource, :stdin, :stdout, :stderr]
+
+  @type stdio_config :: nil | :pipe | :inherit | {:file, Path.t()}
+
+  @type t :: %__MODULE__{
+          cmd: String.t(),
+          args: [String.t()],
+          pid: pos_integer(),
+          status: :running | {:exited, integer()},
+          resource: reference(),
+          stdin: stdio_config(),
+          stdout: stdio_config(),
+          stderr: stdio_config()
+        }
 
   @doc """
   Spawn an OS process running `cmd` with `args`.
 
+  ## Options
+
+  - `:stdin` - stdin configuration (default: `nil` for /dev/null)
+  - `:stdout` - stdout configuration (default: `nil` for /dev/null)
+  - `:stderr` - stderr configuration (default: `nil` for /dev/null)
+  - `:env` - environment variables as a map (merged with inherited environment)
+  - `:cd` - working directory for the child process
+
+  Each stdio option accepts:
+  - `nil` - redirect to /dev/null (safe default)
+  - `:pipe` - create a pipe (enables `read/2` for stdout/stderr, `write/2` for stdin)
+  - `:inherit` - inherit from parent (child uses BEAM's stdio directly)
+  - `{:file, path}` - redirect to/from a file
+
+  ## Returns
+
+  - `{:ok, process}` - process spawned successfully
+  - `{:error, reason}` - failed to spawn (command not found, file error, etc.)
+
   ## Examples
-      
-      iex> process = P.spawn("echo", ["test"])
-      iex> process.cmd
-      "echo"
-      iex> process.args
-      ["test"]
-      iex> process.status
-      :running
-      iex> process = P.wait(process)
-      iex> process.status
-      {:exited, 0}
+
+      iex> {:ok, p} = P.spawn("echo", ["hello"], stdout: :pipe)
+      iex> Process.sleep(50)
+      iex> P.read(p, :stdout)
+      {:ok, "hello\\n"}
+
+      iex> P.spawn("nonexistent_command_12345", [])
+      {:error, "Failed to spawn: No such file or directory (os error 2)"}
   """
-  def spawn(cmd, args) when is_binary(cmd) and is_list(args) do
+  def spawn(cmd, args, opts \\ []) when is_binary(cmd) and is_list(args) do
     ensure_sigchild()
 
-    with {resource, pid} <- spawn_nif(cmd, args) do
-      struct(__MODULE__,
-        cmd: cmd,
-        args: args,
-        pid: pid,
-        resource: resource,
-        status: :running
-      )
+    stdin = Keyword.get(opts, :stdin, nil)
+    stdout = Keyword.get(opts, :stdout, nil)
+    stderr = Keyword.get(opts, :stderr, nil)
+    env = Keyword.get(opts, :env, %{})
+    cd = Keyword.get(opts, :cd, nil)
+
+    {stdin_mode, stdin_path} = encode_stdio(stdin)
+    {stdout_mode, stdout_path} = encode_stdio(stdout)
+    {stderr_mode, stderr_path} = encode_stdio(stderr)
+    env_list = encode_env(env)
+    cd_str = cd || ""
+
+    with {resource, pid} when is_reference(resource) and is_integer(pid) <-
+           spawn_nif(
+             cmd,
+             args,
+             stdin_mode,
+             stdin_path,
+             stdout_mode,
+             stdout_path,
+             stderr_mode,
+             stderr_path,
+             env_list,
+             cd_str
+           ) do
+      {:ok,
+       struct(__MODULE__,
+         cmd: cmd,
+         args: args,
+         pid: pid,
+         resource: resource,
+         status: :running,
+         stdin: stdin,
+         stdout: stdout,
+         stderr: stderr
+       )}
+    end
+  end
+
+  @doc """
+  Spawn an OS process, raising on failure.
+
+  Same as `spawn/3` but raises on error instead of returning `{:error, reason}`.
+
+  ## Examples
+
+      iex> p = P.spawn!("echo", ["hello"], stdout: :pipe)
+      iex> p.status
+      :running
+  """
+  def spawn!(cmd, args, opts \\ []) do
+    case spawn(cmd, args, opts) do
+      {:ok, process} -> process
+      {:error, reason} -> raise "Failed to spawn #{cmd}: #{inspect(reason)}"
     end
   end
 
   @doc """
   Send `signal` to the given process.
 
+  ## Returns
+
+  - `{:ok, process}` - signal was sent successfully
+  - `{:error, :already_exited}` - process has already exited and been reaped
+  - `{:error, reason}` - other error (e.g., permission denied)
+
+  ## Safety
+
+  This function is safe against PID reuse. It checks that the process hasn't
+  been reaped (by `alive?/1` or `wait/1`) before sending the signal. This
+  prevents accidentally signaling an unrelated process that reused the PID.
+
   ## Examples
 
-      iex> process = P.spawn("sleep", ["10"])
-      iex> process.status
-      :running
-      iex> process = P.signal(process, :sigterm)
-      iex> process.status
-      :running
-      iex> process = P.wait(process)
-      iex> process.status
+      iex> {:ok, p} = P.spawn("sleep", ["10"])
+      iex> {:ok, p} = P.signal(p, :sigterm)
+      iex> p = P.wait(p)
+      iex> p.status
       {:exited, 143}
+
+      # Signal after alive? returns false
+      iex> {:ok, p} = P.spawn("true", [])
+      iex> Process.sleep(50)
+      iex> P.alive?(p)
+      false
+      iex> P.signal(p, :sigterm)
+      {:error, :already_exited}
   """
-  def signal(%__MODULE__{pid: pid, status: status} = process, signal)
+  def signal(%__MODULE__{resource: resource, status: status} = process, signal)
       when is_atom(signal) or (is_integer(signal) and signal > 0) do
     ensure_sigchild()
 
     case status do
       {:exited, _} ->
-        raise "Process has already exited"
+        {:error, :already_exited}
 
       :running ->
-        signal_nif(pid, signal_int(signal))
-        process
+        case signal_nif(resource, signal_int(signal)) do
+          :ok -> {:ok, process}
+          {:error, _} = err -> err
+        end
+    end
+  end
+
+  @doc """
+  Send `signal` to the given process, raising on failure.
+
+  Same as `signal/2` but raises on error instead of returning `{:error, reason}`.
+
+  ## Examples
+
+      iex> p = P.spawn!("sleep", ["10"])
+      iex> p = P.signal!(p, :sigterm)
+      iex> p = P.wait(p)
+      iex> p.status
+      {:exited, 143}
+  """
+  def signal!(%__MODULE__{} = process, signal) do
+    case signal(process, signal) do
+      {:ok, process} -> process
+      {:error, reason} -> raise "Failed to signal process: #{inspect(reason)}"
     end
   end
 
   @doc """
   Wait for the given process to complete.
 
-      iex> process = P.spawn("sleep", ["1"])
-      iex> process.status
+  ## Options
+
+  With one argument, blocks indefinitely until the process exits.
+  With a timeout (in milliseconds), returns `:timeout` if the process
+  doesn't exit within the specified time.
+
+  ## Examples
+
+      # Block forever
+      iex> p = P.spawn!("sleep", ["0.1"])
+      iex> p.status
       :running
-      iex> process = P.wait(process)
-      iex> process.status
+      iex> p = P.wait(p)
+      iex> p.status
       {:exited, 0}
+
+      # With timeout
+      iex> p = P.spawn!("sleep", ["10"])
+      iex> P.wait(p, 100)
+      :timeout
+
+      # Typical timeout + kill pattern
+      iex> p = P.spawn!("sleep", ["10"])
+      iex> p = case P.wait(p, 100) do
+      ...>   :timeout ->
+      ...>     P.signal!(p, :sigkill)
+      ...>     P.wait(p)
+      ...>   result -> result
+      ...> end
+      iex> p.status
+      {:exited, 137}
   """
-  def wait(%__MODULE__{resource: resource, status: status} = process) do
+  def wait(process, timeout \\ :infinity)
+
+  def wait(%__MODULE__{resource: resource, status: status} = process, :infinity) do
     ensure_sigchild()
 
     case status do
@@ -94,17 +359,41 @@ defmodule P do
     end
   end
 
+  def wait(%__MODULE__{status: {:exited, _}} = process, _timeout), do: process
+
+  def wait(%__MODULE__{status: :running} = process, timeout)
+      when is_integer(timeout) and timeout >= 0 do
+    ensure_sigchild()
+    deadline = System.monotonic_time(:millisecond) + timeout
+    poll_wait(process, deadline)
+  end
+
+  defp poll_wait(process, deadline) do
+    if alive?(process) do
+      remaining = deadline - System.monotonic_time(:millisecond)
+
+      if remaining > 0 do
+        Process.sleep(min(remaining, 10))
+        poll_wait(process, deadline)
+      else
+        :timeout
+      end
+    else
+      wait(process)
+    end
+  end
+
   @doc """
   Check if the process is still alive.
 
   ## Examples
 
-      iex> process = P.spawn("sleep", ["10"])
-      iex> P.alive?(process)
+      iex> p = P.spawn!("sleep", ["10"])
+      iex> P.alive?(p)
       true
-      iex> P.signal(process, :sigterm)
-      iex> P.wait(process)
-      iex> P.alive?(process)
+      iex> P.signal!(p, :sigterm)
+      iex> P.wait(p)
+      iex> P.alive?(p)
       false
   """
   def alive?(%__MODULE__{resource: resource, status: :running}) do
@@ -114,57 +403,158 @@ defmodule P do
   def alive?(%__MODULE__{status: {:exited, _}}), do: false
 
   @doc """
-  Read from the process stdout.
+  Write data to the process stdin.
+
+  Requires the process to be spawned with `stdin: :pipe`.
+
+  ## Returns
+
+  - `:ok` - all bytes written successfully
+  - `{:partial, bytes_written}` - only some bytes written (buffer full)
+  - `:would_block` - no bytes written, buffer completely full
+  - `{:error, :not_piped}` - stdin was not configured as `:pipe`
+  - `{:error, :broken_pipe}` - child closed stdin or exited
+  - `{:error, reason}` - other IO error
 
   ## Examples
 
-      iex> process = P.spawn("echo", ["hello"])
-      iex> Process.sleep(100) # Wait for output
-      iex> P.read_stdout(process)
-      "hello\\n"
-  """
-  def read_stdout(%__MODULE__{resource: resource}) do
-    read_stdout_nif(resource)
-  end
-
-  @doc """
-  Read from the process stderr.
-
-  ## Examples
-
-      iex> process = P.spawn("sh", ["-c", "echo error >&2"])
-      iex> Process.sleep(100) # Wait for output
-      iex> P.read_stderr(process)
-      "error\\n"
-  """
-  def read_stderr(%__MODULE__{resource: resource}) do
-    read_stderr_nif(resource)
-  end
-
-  @doc """
-  Write to the process stdin.
-
-  ## Examples
-
-      iex> process = P.spawn("cat", [])
-      iex> P.write_stdin(process, "hello")
+      iex> p = P.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
+      iex> P.write(p, "hello")
       :ok
-      iex> Process.sleep(100) # Wait for echo
-      iex> P.read_stdout(process)
-      "hello"
+      iex> P.close!(p, :stdin)
+      :ok
+      iex> Process.sleep(50)
+      iex> P.read(p, :stdout)
+      {:ok, "hello"}
   """
-  def write_stdin(%__MODULE__{resource: resource}, data) do
-    case write_stdin_nif(resource, data) do
-      {} -> :ok
-      error -> error
+  def write(%__MODULE__{stdin: :pipe, resource: resource}, data) when is_binary(data) do
+    write_stdin_nif(resource, data)
+  end
+
+  def write(%__MODULE__{}, _data), do: {:error, :not_piped}
+
+  @doc """
+  Close a pipe to/from the child process.
+
+  ## Streams
+
+  - `:stdin` - Closes the write end of stdin, signaling EOF to the child.
+    Many programs (cat, grep, sort, etc.) wait for stdin EOF before processing.
+
+  - `:stdout` - Closes the read end of stdout. The child will receive SIGPIPE
+    or get EPIPE on its next write to stdout, which typically causes it to exit.
+
+  - `:stderr` - Closes the read end of stderr. Same behavior as stdout.
+
+  ## Warning
+
+  Closing `:stdout` or `:stderr` is a forceful operation. The child process
+  will receive SIGPIPE (default: terminate) when it tries to write. Only use
+  this when you intentionally want to signal the child to stop writing.
+
+  ## Returns
+
+  - `:ok` - pipe closed successfully
+  - `{:error, :not_piped}` - stream was not configured as `:pipe`
+
+  ## Examples
+
+      iex> {:ok, p} = P.spawn("cat", [], stdin: :pipe, stdout: :pipe)
+      iex> P.write(p, "data")
+      :ok
+      iex> P.close(p, :stdin)
+      :ok
+  """
+  def close(%__MODULE__{stdin: :pipe, resource: resource}, :stdin) do
+    close_stdin_nif(resource)
+  end
+
+  def close(%__MODULE__{stdout: :pipe, resource: resource}, :stdout) do
+    close_stdout_nif(resource)
+  end
+
+  def close(%__MODULE__{stderr: :pipe, resource: resource}, :stderr) do
+    close_stderr_nif(resource)
+  end
+
+  def close(%__MODULE__{}, _stream), do: {:error, :not_piped}
+
+  @doc """
+  Close a pipe to/from the child process, raising on failure.
+
+  Same as `close/2` but raises on error instead of returning `{:error, reason}`.
+
+  ## Examples
+
+      iex> p = P.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
+      iex> P.write(p, "data")
+      :ok
+      iex> P.close!(p, :stdin)
+      :ok
+  """
+  def close!(%__MODULE__{} = process, stream) do
+    case close(process, stream) do
+      :ok -> :ok
+      {:error, reason} -> raise "Failed to close #{stream}: #{inspect(reason)}"
     end
   end
 
-  @doc false
-  def spawn_nif(_cmd, _args), do: :erlang.nif_error(:nif_not_loaded)
+  @doc """
+  Read from the process stdout or stderr.
+
+  Requires the process to be spawned with `stdout: :pipe` or `stderr: :pipe`.
+
+  ## Returns
+
+  - `{:ok, binary}` - data was read successfully
+  - `:eof` - the stream has been closed
+  - `:would_block` - no data available right now (non-blocking)
+  - `{:error, :not_piped}` - stream was not configured as `:pipe`
+  - `{:error, reason}` - an error occurred
+
+  ## Examples
+
+      iex> p = P.spawn!("echo", ["hello"], stdout: :pipe)
+      iex> Process.sleep(50)
+      iex> P.read(p, :stdout)
+      {:ok, "hello\\n"}
+
+      iex> p = P.spawn!("sh", ["-c", "echo error >&2"], stderr: :pipe)
+      iex> Process.sleep(50)
+      iex> P.read(p, :stderr)
+      {:ok, "error\\n"}
+
+      iex> {:ok, p} = P.spawn("echo", ["hello"])  # no pipe configured
+      iex> P.read(p, :stdout)
+      {:error, :not_piped}
+  """
+  def read(%__MODULE__{stdout: :pipe, resource: resource}, :stdout) do
+    read_stdout_nif(resource)
+  end
+
+  def read(%__MODULE__{stderr: :pipe, resource: resource}, :stderr) do
+    read_stderr_nif(resource)
+  end
+
+  def read(%__MODULE__{}, _stream), do: {:error, :not_piped}
 
   @doc false
-  def signal_nif(_pid, _signal), do: :erlang.nif_error(:nif_not_loaded)
+  def spawn_nif(
+        _cmd,
+        _args,
+        _stdin_mode,
+        _stdin_path,
+        _stdout_mode,
+        _stdout_path,
+        _stderr_mode,
+        _stderr_path,
+        _env,
+        _cd
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def signal_nif(_resource, _signal), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   def wait_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
@@ -173,20 +563,24 @@ defmodule P do
   def alive_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
+  def write_stdin_nif(_resource, _data), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def close_stdin_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def close_stdout_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  def close_stderr_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
   def read_stdout_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc false
   def read_stderr_nif(_resource), do: :erlang.nif_error(:nif_not_loaded)
 
-  @doc false
-  def write_stdin_nif(_resource, _data), do: :erlang.nif_error(:nif_not_loaded)
-
   defp ensure_sigchild() do
-    # waitpid running in the context of the beam is kind of weird
-    # because the VM sets sigchld and so calls to waitpid just
-    # hang. setting this here prevents this. We don't want to reset
-    # on every call, and an application seems overkill for this, so
-    # we just cache in persistent term
     with nil <- :persistent_term.get({__MODULE__, :sigchld}, nil) do
       case :os.type() do
         {:win32, _} -> :ok
@@ -195,6 +589,19 @@ defmodule P do
 
       :persistent_term.put({__MODULE__, :sigchld}, :set)
     end
+  end
+
+  defp encode_stdio(nil), do: {"null", ""}
+  defp encode_stdio(:pipe), do: {"pipe", ""}
+  defp encode_stdio(:inherit), do: {"inherit", ""}
+  defp encode_stdio({:file, path}) when is_binary(path), do: {"file", path}
+
+  defp encode_env(env) when is_map(env) do
+    Enum.map(env, fn {k, v} -> {to_string(k), to_string(v)} end)
+  end
+
+  defp encode_env(env) when is_list(env) do
+    Enum.map(env, fn {k, v} -> {to_string(k), to_string(v)} end)
   end
 
   defp signal_int(value) when is_integer(value), do: value

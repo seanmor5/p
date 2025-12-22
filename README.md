@@ -1,14 +1,10 @@
 # P
 
-Because I just wanted a library that I could use to spawn and send signals to OS processes
-without needing to download another binary.
+Simple OS process management for Elixir. Spawn processes, send signals, wait for exit.
 
-This is a very simple Rust NIF which uses the `nix` package with `std::process::Command` to
-spawn processes, send signals, and wait with `waitpid`.
+Rust NIF using `nix` and `std::process::Command`. Linux only.
 
 ## Installation
-
-You probably don't want to use this, but if you do:
 
 ```elixir
 def deps do
@@ -20,22 +16,58 @@ end
 
 ## Usage
 
-Spawn a process:
-
 ```elixir
-p = P.spawn("sleep", ["10"])
-```
-
-Send a signal:
-
-```elixir
-p = P.signal(p, :sigterm)
-```
-
-Wait for exit:
-
-```elixir
+# Spawn and wait
+{:ok, p} = P.spawn("echo", ["hello"], stdout: :pipe)
+{:ok, output} = P.read(p, :stdout)
 p = P.wait(p)
+p.status  #=> {:exited, 0}
+
+# Or use bang variants
+p = P.spawn!("sleep", ["10"])
+p = P.signal!(p, :sigterm)
+p = P.wait(p)
+
+# Wait with timeout
+case P.wait(p, 5000) do
+  :timeout ->
+    P.signal!(p, :sigkill)
+    P.wait(p)
+  p -> p
+end
 ```
 
-At this time, this library provides no way to interact with the running process (e.g. reading from stdout or writing to stdin).
+## Stdio
+
+By default, all stdio goes to `/dev/null`. Options:
+
+- `nil` - /dev/null (default)
+- `:pipe` - create pipe for read/write
+- `:inherit` - use parent's stdio
+- `{:file, path}` - redirect to file
+
+```elixir
+# Pipes
+p = P.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
+P.write(p, "hello")
+P.close!(p, :stdin)
+{:ok, data} = P.read(p, :stdout)
+
+# Files
+p = P.spawn!("myapp", [], stdout: {:file, "/var/log/out.log"})
+
+# Inherit (for interactive programs)
+p = P.spawn!("vim", ["file.txt"], stdin: :inherit, stdout: :inherit, stderr: :inherit)
+```
+
+## Options
+
+```elixir
+P.spawn("cmd", ["args"],
+  stdin: :pipe,
+  stdout: :pipe,
+  stderr: :pipe,
+  env: %{"FOO" => "bar"},
+  cd: "/tmp"
+)
+```
