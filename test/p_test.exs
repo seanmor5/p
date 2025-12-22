@@ -188,7 +188,7 @@ defmodule PTest do
     end
 
     test "handles binary data (non-UTF8)" do
-      p = P.spawn!("sh", ["-c", "printf '\\x00\\x01\\x02\\xff'"], stdout: :pipe)
+      p = P.spawn!("printf", ["\\000\\001\\002\\377"], stdout: :pipe)
       Process.sleep(50)
       assert {:ok, data} = P.read(p, :stdout)
       assert data == <<0, 1, 2, 255>>
