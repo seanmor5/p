@@ -38,7 +38,8 @@ defmodule Px.MixProject do
 
   defp package do
     [
-      licenses: ["MIT"],
+      maintainers: ["Sean Moriarity"],
+      licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url},
       files: ~w(lib native .formatter.exs mix.exs README.md LICENSE)
     ]
