@@ -1,19 +1,19 @@
-defmodule P do
+defmodule Px do
   @moduledoc """
   Low-level OS process management for Elixir. Linux only.
 
   ## Basic Usage
 
       # Spawn, signal, wait
-      p = P.spawn!("sleep", ["10"])
-      p = P.signal!(p, :sigterm)
-      p = P.wait(p)
+      p = Px.spawn!("sleep", ["10"])
+      p = Px.signal!(p, :sigterm)
+      p = Px.wait(p)
       p.status  #=> {:exited, 143}
 
       # With error handling
-      {:ok, p} = P.spawn("sleep", ["10"])
-      {:ok, p} = P.signal(p, :sigterm)
-      p = P.wait(p)
+      {:ok, p} = Px.spawn("sleep", ["10"])
+      {:ok, p} = Px.signal(p, :sigterm)
+      p = Px.wait(p)
 
   ## Stdio Configuration
 
@@ -29,14 +29,14 @@ defmodule P do
   Default config discards all output. Useful for daemons or when you
   only care about exit status:
 
-      p = P.spawn!("some-daemon", ["--detach"])
-      p = P.wait(p)
+      p = Px.spawn!("some-daemon", ["--detach"])
+      p = Px.wait(p)
 
   ### File Redirection
 
   Let the OS handle buffering. Good for logging:
 
-      p = P.spawn!("my-server", [],
+      p = Px.spawn!("my-server", [],
         stdout: {:file, "/var/log/out.log"},
         stderr: {:file, "/var/log/err.log"})
 
@@ -45,16 +45,16 @@ defmodule P do
   For reading output or writing input. Non-blocking by default.
 
       # Capture output
-      p = P.spawn!("echo", ["hello"], stdout: :pipe)
+      p = Px.spawn!("echo", ["hello"], stdout: :pipe)
       Process.sleep(50)  # let it run
-      {:ok, "hello\\n"} = P.read(p, :stdout)
+      {:ok, "hello\\n"} = Px.read(p, :stdout)
 
       # Feed input
-      p = P.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
-      P.write(p, "hello")
-      P.close!(p, :stdin)  # signals EOF
+      p = Px.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
+      Px.write(p, "hello")
+      Px.close!(p, :stdin)  # signals EOF
       Process.sleep(50)
-      {:ok, "hello"} = P.read(p, :stdout)
+      {:ok, "hello"} = Px.read(p, :stdout)
 
   **Warning:** Pipes have limited buffer (~64KB). If the child writes more
   than the buffer can hold and you don't read, the child blocks forever.
@@ -64,27 +64,27 @@ defmodule P do
 
   Child uses BEAM's terminal directly. For interactive programs:
 
-      p = P.spawn!("vim", ["file.txt"],
+      p = Px.spawn!("vim", ["file.txt"],
         stdin: :inherit,
         stdout: :inherit,
         stderr: :inherit)
-      P.wait(p)
+      Px.wait(p)
 
   ## Timeouts
 
   `wait/2` accepts a timeout in milliseconds:
 
-      case P.wait(p, 5_000) do
+      case Px.wait(p, 5_000) do
         :timeout ->
-          P.signal!(p, :sigkill)
-          P.wait(p)
+          Px.signal!(p, :sigkill)
+          Px.wait(p)
         p ->
           p
       end
 
   ## Environment and Working Directory
 
-      P.spawn!("make", ["build"],
+      Px.spawn!("make", ["build"],
         cd: "/path/to/project",
         env: %{"CC" => "clang", "CFLAGS" => "-O2"})
 
@@ -94,10 +94,10 @@ defmodule P do
 
   Signals are sent by name (atom) or number:
 
-      P.signal!(p, :sigterm)   # graceful shutdown
-      P.signal!(p, :sigkill)   # force kill
-      P.signal!(p, :sigusr1)   # user-defined
-      P.signal!(p, 15)         # by number
+      Px.signal!(p, :sigterm)   # graceful shutdown
+      Px.signal!(p, :sigkill)   # force kill
+      Px.signal!(p, :sigusr1)   # user-defined
+      Px.signal!(p, 15)         # by number
 
   Signal safety: once a process has been reaped (via `alive?/1` or `wait/1`),
   `signal/2` returns `{:error, :already_exited}` to prevent signaling a
@@ -107,12 +107,12 @@ defmodule P do
 
   Pipe operations are non-blocking:
 
-      P.read(p, :stdout)
+      Px.read(p, :stdout)
       #=> {:ok, binary}    - data available
       #=> :would_block     - no data yet
       #=> :eof             - stream closed
 
-      P.write(p, data)
+      Px.write(p, data)
       #=> :ok              - all written
       #=> {:partial, n}    - buffer full, n bytes written
       #=> :would_block     - buffer completely full
@@ -120,7 +120,7 @@ defmodule P do
 
   ## Process Lifecycle
 
-  1. `spawn/3` - creates process, returns `{:ok, %P{status: :running}}`
+  1. `spawn/3` - creates process, returns `{:ok, %Px{status: :running}}`
   2. `alive?/1` - checks if still running (non-blocking)
   3. `signal/2` - sends signal
   4. `wait/1,2` - blocks until exit, updates `status` to `{:exited, code}`
@@ -130,7 +130,7 @@ defmodule P do
   """
   import Kernel, except: [spawn: 1, spawn: 3]
 
-  use Rustler, otp_app: :p, crate: "p"
+  use Rustler, otp_app: :px, crate: "px"
 
   defstruct [:cmd, :args, :pid, :status, :resource, :stdin, :stdout, :stderr]
 
@@ -171,12 +171,12 @@ defmodule P do
 
   ## Examples
 
-      iex> {:ok, p} = P.spawn("echo", ["hello"], stdout: :pipe)
+      iex> {:ok, p} = Px.spawn("echo", ["hello"], stdout: :pipe)
       iex> Process.sleep(50)
-      iex> P.read(p, :stdout)
+      iex> Px.read(p, :stdout)
       {:ok, "hello\\n"}
 
-      iex> P.spawn("nonexistent_command_12345", [])
+      iex> Px.spawn("nonexistent_command_12345", [])
       {:error, "Failed to spawn: No such file or directory (os error 2)"}
   """
   def spawn(cmd, args, opts \\ []) when is_binary(cmd) and is_list(args) do
@@ -228,7 +228,7 @@ defmodule P do
 
   ## Examples
 
-      iex> p = P.spawn!("echo", ["hello"], stdout: :pipe)
+      iex> p = Px.spawn!("echo", ["hello"], stdout: :pipe)
       iex> p.status
       :running
   """
@@ -256,18 +256,18 @@ defmodule P do
 
   ## Examples
 
-      iex> {:ok, p} = P.spawn("sleep", ["10"])
-      iex> {:ok, p} = P.signal(p, :sigterm)
-      iex> p = P.wait(p)
+      iex> {:ok, p} = Px.spawn("sleep", ["10"])
+      iex> {:ok, p} = Px.signal(p, :sigterm)
+      iex> p = Px.wait(p)
       iex> p.status
       {:exited, 143}
 
       # Signal after alive? returns false
-      iex> {:ok, p} = P.spawn("true", [])
+      iex> {:ok, p} = Px.spawn("true", [])
       iex> Process.sleep(50)
-      iex> P.alive?(p)
+      iex> Px.alive?(p)
       false
-      iex> P.signal(p, :sigterm)
+      iex> Px.signal(p, :sigterm)
       {:error, :already_exited}
   """
   def signal(%__MODULE__{resource: resource, status: status} = process, signal)
@@ -293,9 +293,9 @@ defmodule P do
 
   ## Examples
 
-      iex> p = P.spawn!("sleep", ["10"])
-      iex> p = P.signal!(p, :sigterm)
-      iex> p = P.wait(p)
+      iex> p = Px.spawn!("sleep", ["10"])
+      iex> p = Px.signal!(p, :sigterm)
+      iex> p = Px.wait(p)
       iex> p.status
       {:exited, 143}
   """
@@ -318,24 +318,24 @@ defmodule P do
   ## Examples
 
       # Block forever
-      iex> p = P.spawn!("sleep", ["0.1"])
+      iex> p = Px.spawn!("sleep", ["0.1"])
       iex> p.status
       :running
-      iex> p = P.wait(p)
+      iex> p = Px.wait(p)
       iex> p.status
       {:exited, 0}
 
       # With timeout
-      iex> p = P.spawn!("sleep", ["10"])
-      iex> P.wait(p, 100)
+      iex> p = Px.spawn!("sleep", ["10"])
+      iex> Px.wait(p, 100)
       :timeout
 
       # Typical timeout + kill pattern
-      iex> p = P.spawn!("sleep", ["10"])
-      iex> p = case P.wait(p, 100) do
+      iex> p = Px.spawn!("sleep", ["10"])
+      iex> p = case Px.wait(p, 100) do
       ...>   :timeout ->
-      ...>     P.signal!(p, :sigkill)
-      ...>     P.wait(p)
+      ...>     Px.signal!(p, :sigkill)
+      ...>     Px.wait(p)
       ...>   result -> result
       ...> end
       iex> p.status
@@ -388,12 +388,12 @@ defmodule P do
 
   ## Examples
 
-      iex> p = P.spawn!("sleep", ["10"])
-      iex> P.alive?(p)
+      iex> p = Px.spawn!("sleep", ["10"])
+      iex> Px.alive?(p)
       true
-      iex> P.signal!(p, :sigterm)
-      iex> P.wait(p)
-      iex> P.alive?(p)
+      iex> Px.signal!(p, :sigterm)
+      iex> Px.wait(p)
+      iex> Px.alive?(p)
       false
   """
   def alive?(%__MODULE__{resource: resource, status: :running}) do
@@ -418,13 +418,13 @@ defmodule P do
 
   ## Examples
 
-      iex> p = P.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
-      iex> P.write(p, "hello")
+      iex> p = Px.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
+      iex> Px.write(p, "hello")
       :ok
-      iex> P.close!(p, :stdin)
+      iex> Px.close!(p, :stdin)
       :ok
       iex> Process.sleep(50)
-      iex> P.read(p, :stdout)
+      iex> Px.read(p, :stdout)
       {:ok, "hello"}
   """
   def write(%__MODULE__{stdin: :pipe, resource: resource}, data) when is_binary(data) do
@@ -459,10 +459,10 @@ defmodule P do
 
   ## Examples
 
-      iex> {:ok, p} = P.spawn("cat", [], stdin: :pipe, stdout: :pipe)
-      iex> P.write(p, "data")
+      iex> {:ok, p} = Px.spawn("cat", [], stdin: :pipe, stdout: :pipe)
+      iex> Px.write(p, "data")
       :ok
-      iex> P.close(p, :stdin)
+      iex> Px.close(p, :stdin)
       :ok
   """
   def close(%__MODULE__{stdin: :pipe, resource: resource}, :stdin) do
@@ -486,10 +486,10 @@ defmodule P do
 
   ## Examples
 
-      iex> p = P.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
-      iex> P.write(p, "data")
+      iex> p = Px.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
+      iex> Px.write(p, "data")
       :ok
-      iex> P.close!(p, :stdin)
+      iex> Px.close!(p, :stdin)
       :ok
   """
   def close!(%__MODULE__{} = process, stream) do
@@ -514,18 +514,18 @@ defmodule P do
 
   ## Examples
 
-      iex> p = P.spawn!("echo", ["hello"], stdout: :pipe)
+      iex> p = Px.spawn!("echo", ["hello"], stdout: :pipe)
       iex> Process.sleep(50)
-      iex> P.read(p, :stdout)
+      iex> Px.read(p, :stdout)
       {:ok, "hello\\n"}
 
-      iex> p = P.spawn!("sh", ["-c", "echo error >&2"], stderr: :pipe)
+      iex> p = Px.spawn!("sh", ["-c", "echo error >&2"], stderr: :pipe)
       iex> Process.sleep(50)
-      iex> P.read(p, :stderr)
+      iex> Px.read(p, :stderr)
       {:ok, "error\\n"}
 
-      iex> {:ok, p} = P.spawn("echo", ["hello"])  # no pipe configured
-      iex> P.read(p, :stdout)
+      iex> {:ok, p} = Px.spawn("echo", ["hello"])  # no pipe configured
+      iex> Px.read(p, :stdout)
       {:error, :not_piped}
   """
   def read(%__MODULE__{stdout: :pipe, resource: resource}, :stdout) do

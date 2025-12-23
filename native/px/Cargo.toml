@@ -1,11 +1,11 @@
 [package]
-name = "p"
+name = "px"
 version = "0.1.0"
 authors = []
 edition = "2021"
 
 [lib]
-name = "p"
+name = "px"
 crate-type = ["cdylib"]
 
 [dependencies]

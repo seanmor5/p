@@ -1,4 +1,4 @@
-# P
+# Px
 
 Simple OS process management for Elixir. Spawn processes, send signals, wait for exit.
 
@@ -9,7 +9,7 @@ Rust NIF using `nix` and `std::process::Command`. Linux only.
 ```elixir
 def deps do
   [
-    {:p, github: "seanmor5/p"}
+    {:px, "~> 0.1.0"}
   ]
 end
 ```
@@ -18,21 +18,21 @@ end
 
 ```elixir
 # Spawn and wait
-{:ok, p} = P.spawn("echo", ["hello"], stdout: :pipe)
-{:ok, output} = P.read(p, :stdout)
-p = P.wait(p)
+{:ok, p} = Px.spawn("echo", ["hello"], stdout: :pipe)
+{:ok, output} = Px.read(p, :stdout)
+p = Px.wait(p)
 p.status  #=> {:exited, 0}
 
 # Or use bang variants
-p = P.spawn!("sleep", ["10"])
-p = P.signal!(p, :sigterm)
-p = P.wait(p)
+p = Px.spawn!("sleep", ["10"])
+p = Px.signal!(p, :sigterm)
+p = Px.wait(p)
 
 # Wait with timeout
-case P.wait(p, 5000) do
+case Px.wait(p, 5000) do
   :timeout ->
-    P.signal!(p, :sigkill)
-    P.wait(p)
+    Px.signal!(p, :sigkill)
+    Px.wait(p)
   p -> p
 end
 ```
@@ -48,22 +48,22 @@ By default, all stdio goes to `/dev/null`. Options:
 
 ```elixir
 # Pipes
-p = P.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
-P.write(p, "hello")
-P.close!(p, :stdin)
-{:ok, data} = P.read(p, :stdout)
+p = Px.spawn!("cat", [], stdin: :pipe, stdout: :pipe)
+Px.write(p, "hello")
+Px.close!(p, :stdin)
+{:ok, data} = Px.read(p, :stdout)
 
 # Files
-p = P.spawn!("myapp", [], stdout: {:file, "/var/log/out.log"})
+p = Px.spawn!("myapp", [], stdout: {:file, "/var/log/out.log"})
 
 # Inherit (for interactive programs)
-p = P.spawn!("vim", ["file.txt"], stdin: :inherit, stdout: :inherit, stderr: :inherit)
+p = Px.spawn!("vim", ["file.txt"], stdin: :inherit, stdout: :inherit, stderr: :inherit)
 ```
 
 ## Options
 
 ```elixir
-P.spawn("cmd", ["args"],
+Px.spawn("cmd", ["args"],
   stdin: :pipe,
   stdout: :pipe,
   stderr: :pipe,

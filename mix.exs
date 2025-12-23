@@ -1,12 +1,12 @@
-defmodule P.MixProject do
+defmodule Px.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/seanmor5/p"
+  @source_url "https://github.com/seanmor5/px"
 
   def project do
     [
-      app: :p,
+      app: :px,
       version: @version,
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
@@ -14,7 +14,7 @@ defmodule P.MixProject do
       description: description(),
       package: package(),
       docs: docs(),
-      name: "P",
+      name: "Px",
       source_url: @source_url
     ]
   end
@@ -46,7 +46,7 @@ defmodule P.MixProject do
 
   defp docs do
     [
-      main: "P",
+      main: "Px",
       source_ref: "v#{@version}",
       source_url: @source_url
     ]

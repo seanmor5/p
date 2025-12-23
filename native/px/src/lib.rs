@@ -22,14 +22,12 @@ mod atoms {
         broken_pipe,
         not_piped,
         already_exited,
-        // stdio config atoms
         null,
         pipe,
         file,
     }
 }
 
-/// Internal stdio configuration
 #[derive(Debug)]
 enum StdioConfig {
     Null,
@@ -38,9 +36,6 @@ enum StdioConfig {
     File(String),
 }
 
-/// Parse stdio config from mode string and optional path
-/// mode is "null", "pipe", "inherit", or "file"
-/// path is the file path (empty string if not file mode)
 fn parse_stdio_config(mode: &str, path: &str) -> NifResult<StdioConfig> {
     match mode {
         "null" => Ok(StdioConfig::Null),
@@ -61,17 +56,12 @@ fn parse_stdio_config(mode: &str, path: &str) -> NifResult<StdioConfig> {
 
 pub struct ProcessResource {
     child: Mutex<Option<Child>>,
-    /// Cached exit code from try_wait, so alive? doesn't lose the status
     cached_exit_code: Mutex<Option<i32>>,
-    /// Stdin pipe, held separately for independent locking
     stdin_pipe: Mutex<Option<ChildStdin>>,
-    /// Stdout pipe, held separately for independent locking
     stdout_pipe: Mutex<Option<ChildStdout>>,
-    /// Stderr pipe, held separately for independent locking
     stderr_pipe: Mutex<Option<ChildStderr>>,
 }
 
-/// Set O_NONBLOCK on a file descriptor
 fn set_nonblocking<T: AsRawFd>(stream: &T) -> Result<(), nix::Error> {
     let fd = stream.as_raw_fd();
     let flags = fcntl(fd, FcntlArg::F_GETFL)?;
@@ -80,7 +70,6 @@ fn set_nonblocking<T: AsRawFd>(stream: &T) -> Result<(), nix::Error> {
     Ok(())
 }
 
-/// Convert an ExitStatus to an exit code integer
 fn exit_status_to_code(status: std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
         code
@@ -121,7 +110,6 @@ fn spawn_nif(
     let mut command = Command::new(&cmd);
     command.args(&arguments);
 
-    // Set environment variables (merged with inherited environment)
     for (key, value) in env {
         command.env(key, value);
     }
@@ -130,7 +118,6 @@ fn spawn_nif(
         command.current_dir(&cd);
     }
 
-    // Configure stdin
     match &stdin_config {
         StdioConfig::Null => {
             command.stdin(Stdio::null());
@@ -152,7 +139,6 @@ fn spawn_nif(
         }
     }
 
-    // Configure stdout
     match &stdout_config {
         StdioConfig::Null => {
             command.stdout(Stdio::null());
@@ -174,7 +160,6 @@ fn spawn_nif(
         }
     }
 
-    // Configure stderr
     match &stderr_config {
         StdioConfig::Null => {
             command.stderr(Stdio::null());
@@ -196,12 +181,9 @@ fn spawn_nif(
         }
     }
 
-    // On Linux, set PR_SET_PDEATHSIG so child gets SIGKILL when parent dies.
-    // This prevents orphan processes if the BEAM crashes.
     #[cfg(target_os = "linux")]
     unsafe {
         command.pre_exec(|| {
-            // PR_SET_PDEATHSIG = 1, SIGKILL = 9
             let result = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
             if result == -1 {
                 return Err(std::io::Error::last_os_error());
@@ -214,12 +196,10 @@ fn spawn_nif(
         Ok(mut child) => {
             let pid = child.id() as i32;
 
-            // Extract and configure pipes
             let stdin_pipe = child.stdin.take();
             let stdout_pipe = child.stdout.take();
             let stderr_pipe = child.stderr.take();
 
-            // Set non-blocking on readable pipes
             if let Some(ref stdout) = stdout_pipe {
                 if let Err(e) = set_nonblocking(stdout) {
                     return Err(Error::Term(Box::new(format!(
@@ -236,7 +216,6 @@ fn spawn_nif(
                     ))));
                 }
             }
-            // Set non-blocking on stdin too for non-blocking writes
             if let Some(ref stdin) = stdin_pipe {
                 if let Err(e) = set_nonblocking(stdin) {
                     return Err(Error::Term(Box::new(format!(
@@ -265,20 +244,15 @@ fn signal_nif<'a>(
     resource: ResourceArc<ProcessResource>,
     signal: i32,
 ) -> NifResult<Term<'a>> {
-    // Hold lock on cached_exit_code while we check and potentially signal.
-    // This prevents alive_nif from reaping the zombie between our check and kill().
     let cached = resource
         .cached_exit_code
         .lock()
         .map_err(|e| Error::Term(Box::new(format!("Lock failed: {}", e))))?;
 
     if cached.is_some() {
-        // Process has been reaped (by alive? or wait), PID may have been recycled.
-        // Refuse to signal to avoid hitting an unrelated process.
         return Ok((atoms::error(), atoms::already_exited()).encode(env));
     }
 
-    // Get PID from child (process is either running or a zombie we haven't reaped)
     let child_lock = resource
         .child
         .lock()
@@ -290,7 +264,6 @@ fn signal_nif<'a>(
         return Ok((atoms::error(), atoms::already_exited()).encode(env));
     };
 
-    // Release child lock before syscall (keep cached lock to prevent race)
     drop(child_lock);
 
     let sig = Signal::try_from(signal).map_err(|_| Error::Term(Box::new("Invalid signal")))?;
@@ -303,7 +276,6 @@ fn signal_nif<'a>(
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn wait_nif(resource: ResourceArc<ProcessResource>) -> NifResult<i32> {
-    // Check cache first
     {
         let cached = resource
             .cached_exit_code
@@ -323,7 +295,6 @@ fn wait_nif(resource: ResourceArc<ProcessResource>) -> NifResult<i32> {
         match child.wait() {
             Ok(status) => {
                 let code = exit_status_to_code(status);
-                // Cache the exit code
                 let mut cached = resource
                     .cached_exit_code
                     .lock()
@@ -334,7 +305,6 @@ fn wait_nif(resource: ResourceArc<ProcessResource>) -> NifResult<i32> {
             Err(e) => Err(Error::Term(Box::new(format!("Failed to wait: {}", e)))),
         }
     } else {
-        // Check cache again - process may have been reaped by alive_nif
         let cached = resource
             .cached_exit_code
             .lock()
@@ -348,7 +318,6 @@ fn wait_nif(resource: ResourceArc<ProcessResource>) -> NifResult<i32> {
 
 #[rustler::nif]
 fn alive_nif(resource: ResourceArc<ProcessResource>) -> NifResult<bool> {
-    // Check cache first
     {
         let cached = resource
             .cached_exit_code
@@ -525,4 +494,4 @@ fn read_stderr_nif<'a>(
     }
 }
 
-rustler::init!("Elixir.P", load = load);
+rustler::init!("Elixir.Px", load = load);
