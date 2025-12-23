@@ -29,11 +29,9 @@ p = Px.signal!(p, :sigterm)
 p = Px.wait(p)
 
 # Wait with timeout
-case Px.wait(p, 5000) do
-  :timeout ->
-    Px.signal!(p, :sigkill)
-    Px.wait(p)
-  p -> p
+with :timeout <- Px.wait(p, 5000) do
+  Px.signal!(p, :sigkill)
+  Px.wait(p)
 end
 ```
 
